@@ -7,30 +7,30 @@ use std::{
     time::Duration,
 };
 fn main() {
-    // tcp listener will listen to incoming requests
-    // in this case, we are binding or listening to port 7878 on localhost
+    // the listerner is of type TcpListener, and calls the bind function.
+    // this bind function will listen to the address and port we pass in
     let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
 
-    // lets make this multithreaded :D
-    // because we do not want to make an unlimited number of threads, we will use a thread pool
-    // threadpool is implemenented below
-
+    // webservers are better when they are multithreaded, as that means they can handle multiple requests at once
+    // but some management is needed. we want to make sure that we do not create an unlimited number of threads.
+    // this is important to prevent the server from running out of resources
+    // so we will construct a thread pool to manage the threads
     // this is nice because we can limit the number of threads (or workers) that are created
-    // the thread pool will have a number of resuable threads that will handle incoming requests
 
     // in this case, we are creating a thread pool with 5 threads
     let pool = ThreadPool::new(5);
 
     // using the tcp listener, we will loop through each incoming request
     // we want to assign each request to a thread in the thread pool
-    // we will use the threadpool's execute method to do this
     for stream in listener.incoming() {
         // when we get a request, it is of type result, we must unwrap it
         let stream = stream.unwrap();
 
-        // finally, we will execute the request
-        // using the threadpool's execute method, we will pass in an anonymous function
-        // this function will call the handle_connection function, that will handle the request
+        // finally, we will respond to the request
+        // using the threadpool's execute method, we will pass in an anonymous function that will execute the handle_connection function
+        // the execute function will pass our anonymous function to the threadpool, which will then send the job to an available worker.
+        // this worker will then execute the anonymous function, which will then execute the handle_connection function
+        // aka. a worker will execute the handle_connection function
         pool.execute(|| {
             handle_connection(stream);
         });
@@ -39,17 +39,18 @@ fn main() {
     println!("Shutting down.");
 }
 
+// handle a connection to the server
 fn handle_connection(mut stream: TcpStream) {
     // we can read the request from the stream into a buffer we create
     let mut buffer = [0; 1024];
 
-    // I think this can return an error, so we should handle it properly later
+    // read the request into the buffer
     stream.read(&mut buffer).unwrap();
 
     // we can now create a few responses to expect from a client
     // we will use these to compare them to an incoming request
 
-    // notice that we are using byte strings, this is because we are comparing the request to the byte string
+    // notice that we are using byte strings, this is because the request is a byte string
     // we can create a byte string by using the b"" syntax
 
     // GET /
@@ -63,6 +64,7 @@ fn handle_connection(mut stream: TcpStream) {
     let (status_line, filename) = if buffer.starts_with(get) {
         ("HTTP/1.1 200 OK", "hello.html")
     } else if buffer.starts_with(sleep) {
+        // this will sleep the thread for 20 seconds, which will simulate a slow request
         thread::sleep(Duration::from_secs(20));
         ("HTTP/1.1 200 OK", "hello.html")
     } else {
@@ -81,7 +83,6 @@ fn handle_connection(mut stream: TcpStream) {
     );
 
     // finally, we can write the response to the stream
-    // note again that this can return an error, so we should handle it properly later
     stream.write_all(response.as_bytes()).unwrap();
     stream.flush().unwrap();
 }
@@ -90,9 +91,11 @@ fn handle_connection(mut stream: TcpStream) {
  * A job is the function that will be executed by the worker
  * FnOnce means that the function can only be called once
  * Send is required because the function will be sent to another thread
- * 'static means that the function can live for the entire duration of the program instead of just the duration of the function
+ * 'static means that the function can live for the entire duration of the program instead of just the duration of the function when spawned
  */
 type Job = Box<dyn FnOnce() + Send + 'static>;
+
+// this is the threadpool struct that will manage the workers
 pub struct ThreadPool {
     // an array of workers or threads that will handle the requests
     workers: Vec<Worker>,
@@ -105,7 +108,7 @@ impl ThreadPool {
     // this function will initialize a new thread pool
     // it will take the number of workers to spawn and initialize them
     pub fn new(size: usize) -> ThreadPool {
-        // ensure that the size is greater than 0
+        // ensure that the size is greater than 0, as we cannot have a threadpool with 0 workers
         assert!(size > 0);
 
         // using mpsc, we will create a channel that will send jobs to the workers
@@ -143,12 +146,13 @@ impl ThreadPool {
         F: FnOnce() + Send + 'static,
     {
         // we will create a job from the function
+        // im not compleatly sure why we need to box the function, but i believe it has to do with the fact that the function is unknown at compile time
         let job = Box::new(f);
 
         // finally, we will send the job to the workers using the sender
         // the workers will then receive the job and execute it
         // the sender is an option, and if it is none, we will do nothing
-        // this helps us to gracefully shutdown the threadpool
+        // this helps us to gracefully shutdown the threadpool and prevent any more jobs from being sent to the workers
         match self.sender.as_ref() {
             Some(sender) => {
                 sender.send(job).unwrap();
@@ -182,7 +186,7 @@ impl Drop for ThreadPool {
 }
 
 // this is the worker struct, aka the thread
-// it will have an id and a thread handle (just a thread)
+// it will have an id and a thread handle
 struct Worker {
     id: usize,
     thread: Option<thread::JoinHandle<()>>,
@@ -202,6 +206,7 @@ impl Worker {
             // then we use the recv function to receive the job, which will further block the thread until a job is available
             let message = receiver.lock().unwrap().recv();
 
+            // we have a message, aka a job. (hopefully)
             // the message will be a result, so we will match on it
             match message {
                 Ok(job) => {
@@ -213,7 +218,7 @@ impl Worker {
                 }
                 Err(_) => {
                     println!("Worker {id} disconnected; shutting down.");
-                    // if we receive an error, lets shutdown the thread
+                    // if we receive an error, lets shutdown the thread by breaking out of the loop
                     break;
                 }
             }
